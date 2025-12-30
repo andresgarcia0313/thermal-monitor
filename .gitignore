@@ -1,3 +1,4 @@
 
 # Rust
 thermal-monitor-gui/target/
+thermal-monitor-gui/*.deb

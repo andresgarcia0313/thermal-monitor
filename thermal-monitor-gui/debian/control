@@ -1,0 +1,20 @@
+Package: thermal-monitor
+Version: 1.0.0
+Section: utils
+Priority: optional
+Architecture: amd64
+Depends: libc6 (>= 2.34), libgcc-s1 (>= 4.2), libgl1, libwayland-client0, libx11-6, libxcursor1, libxi6, libxkbcommon0
+Maintainer: Andres Garcia <andresgarcia0313@gmail.com>
+Homepage: https://github.com/andresgarcia0313
+Description: Thermal monitoring GUI for Lenovo IdeaPad
+ A minimal thermal monitoring application that displays CPU and
+ estimated keyboard temperatures with real-time updates.
+ .
+ Features:
+  - Real-time CPU temperature monitoring
+  - Keyboard temperature estimation using physics model
+  - Thermal zone color coding (Cool to Critical)
+  - CPU performance mode control (Performance/Comfort/Balanced/Quiet/Auto)
+  - Temperature history graph (2 minute rolling window)
+ .
+ Designed specifically for Lenovo IdeaPad laptops with Intel processors.

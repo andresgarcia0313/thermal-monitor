@@ -1,9 +1,12 @@
 [Desktop Entry]
 Name=Thermal Monitor
-Comment=Monitor and control CPU thermal management
+GenericName=CPU Temperature Monitor
+Comment=Monitor and control CPU thermal management for Lenovo IdeaPad
 Exec=/usr/local/bin/thermal-monitor
 Icon=utilities-system-monitor
 Terminal=false
 Type=Application
-Categories=System;Monitor;
-Keywords=temperature;cpu;thermal;fan;
+Categories=System;Settings;HardwareSettings;Monitor;
+Keywords=temperature;cpu;thermal;fan;cooling;performance;
+StartupNotify=true
+StartupWMClass=thermal-monitor
