@@ -11,8 +11,8 @@ use app::ThermalApp;
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([450.0, 520.0])
-            .with_min_inner_size([400.0, 480.0])
+            .with_inner_size([800.0, 600.0])
+            .with_min_inner_size([800.0, 600.0])
             .with_title("Thermal Monitor"),
         ..Default::default()
     };

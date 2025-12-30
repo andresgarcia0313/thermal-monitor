@@ -85,6 +85,7 @@ pub struct ThermalApp {
     history: TemperatureHistory,
     last_update: Instant,
     status_message: Option<(String, Instant)>,
+    target_temp: f32,
 }
 
 impl Default for ThermalApp {
@@ -98,6 +99,7 @@ impl Default for ThermalApp {
             history,
             last_update: Instant::now(),
             status_message: None,
+            target_temp: 55.0,
         }
     }
 }
@@ -245,24 +247,56 @@ impl ThermalApp {
 
                 let button = egui::Button::new(
                     egui::RichText::new(mode.label())
-                        .size(12.0)
+                        .size(14.0)
                         .color(if is_current { egui::Color32::BLACK } else { color }),
                 )
                 .fill(if is_current { color } else { egui::Color32::TRANSPARENT })
                 .stroke(egui::Stroke::new(1.0, color))
-                .min_size(egui::vec2(80.0, 30.0));
+                .min_size(egui::vec2(120.0, 35.0));
 
                 if ui.add(button).clicked() && !is_current {
                     self.change_mode(*mode);
                 }
 
-                ui.add_space(5.0);
+                ui.add_space(8.0);
+            }
+        });
+    }
+
+    /// Render target temperature control
+    fn render_target_temp(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Target:").size(14.0));
+            ui.add_space(10.0);
+
+            let slider = egui::Slider::new(&mut self.target_temp, 40.0..=80.0)
+                .suffix("°C")
+                .step_by(1.0)
+                .text("");
+            ui.add_sized([200.0, 25.0], slider);
+
+            ui.add_space(15.0);
+
+            // Show warning if CPU exceeds target
+            if self.state.cpu_temp > self.target_temp {
+                ui.label(
+                    egui::RichText::new(format!("⚠ CPU exceeds target by {:.1}°C",
+                        self.state.cpu_temp - self.target_temp))
+                        .size(13.0)
+                        .color(egui::Color32::from_rgb(255, 150, 100)),
+                );
+            } else {
+                ui.label(
+                    egui::RichText::new("✓ Within target")
+                        .size(13.0)
+                        .color(egui::Color32::from_rgb(100, 220, 100)),
+                );
             }
         });
     }
 
     /// Render temperature history graph
-    fn render_history(&self, ui: &mut egui::Ui) {
+    fn render_history(&self, ui: &mut egui::Ui, target_temp: f32) {
         if self.history.is_empty() {
             return;
         }
@@ -277,12 +311,22 @@ impl ThermalApp {
             .color(egui::Color32::from_rgb(100, 200, 255))
             .width(2.0);
 
+        // Target temperature line
+        let target_points: Vec<[f64; 2]> = (0..HISTORY_CAPACITY)
+            .map(|i| [i as f64, target_temp as f64])
+            .collect();
+        let target_line = Line::new(PlotPoints::new(target_points))
+            .name("Target")
+            .color(egui::Color32::from_rgb(255, 200, 100))
+            .width(1.5)
+            .style(egui_plot::LineStyle::dashed_loose());
+
         Plot::new("temp_history")
-            .height(150.0)
+            .height(200.0)
             .show_axes(true)
             .show_grid(true)
             .include_y(30.0)
-            .include_y(70.0)
+            .include_y(80.0)
             .allow_zoom(false)
             .allow_drag(false)
             .allow_scroll(false)
@@ -290,6 +334,7 @@ impl ThermalApp {
             .show(ui, |plot_ui| {
                 plot_ui.line(cpu_line);
                 plot_ui.line(kbd_line);
+                plot_ui.line(target_line);
             });
     }
 
@@ -299,7 +344,7 @@ impl ThermalApp {
             // Status message (auto-clear after 3 seconds)
             if let Some((msg, time)) = &self.status_message {
                 if time.elapsed() < Duration::from_secs(3) {
-                    ui.label(egui::RichText::new(msg).size(11.0).color(egui::Color32::YELLOW));
+                    ui.label(egui::RichText::new(msg).size(12.0).color(egui::Color32::YELLOW));
                 } else {
                     self.status_message = None;
                 }
@@ -307,9 +352,9 @@ impl ThermalApp {
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(
-                    egui::RichText::new(format!("Profile: {}", self.state.platform_profile))
-                        .size(10.0)
-                        .color(egui::Color32::GRAY),
+                    egui::RichText::new("Lenovo IdeaPad Thermal Monitor v1.0.0")
+                        .size(11.0)
+                        .color(egui::Color32::DARK_GRAY),
                 );
             });
         });
@@ -331,50 +376,75 @@ impl eframe::App for ThermalApp {
         ctx.set_visuals(egui::Visuals::dark());
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
+            ui.spacing_mut().item_spacing = egui::vec2(12.0, 8.0);
 
             // Title
-            ui.heading("Thermal Monitor");
-            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                ui.heading(egui::RichText::new("Thermal Monitor").size(24.0));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(format!("Profile: {}", self.state.platform_profile))
+                            .size(12.0)
+                            .color(egui::Color32::GRAY),
+                    );
+                });
+            });
+            ui.separator();
+            ui.add_space(5.0);
 
-            // Temperatures
-            ui.group(|ui| {
-                ui.label(egui::RichText::new("Temperatures").size(12.0).strong());
-                ui.add_space(5.0);
-                self.render_temperatures(ui);
+            // Top row: Temperatures and Performance side by side
+            ui.horizontal(|ui| {
+                // Left: Temperatures
+                ui.group(|ui| {
+                    ui.set_min_width(380.0);
+                    ui.label(egui::RichText::new("Temperatures").size(14.0).strong());
+                    ui.add_space(5.0);
+                    self.render_temperatures(ui);
+                });
+
+                ui.add_space(10.0);
+
+                // Right: Performance
+                ui.group(|ui| {
+                    ui.set_min_width(350.0);
+                    ui.label(egui::RichText::new("Performance").size(14.0).strong());
+                    ui.add_space(5.0);
+                    self.render_performance(ui);
+                });
             });
 
-            ui.add_space(10.0);
+            ui.add_space(8.0);
 
-            // Performance
+            // Controls row
             ui.group(|ui| {
-                ui.label(egui::RichText::new("Performance").size(12.0).strong());
-                ui.add_space(5.0);
-                self.render_performance(ui);
-            });
-
-            ui.add_space(10.0);
-
-            // Controls
-            ui.group(|ui| {
-                ui.label(egui::RichText::new("Mode Control").size(12.0).strong());
+                ui.label(egui::RichText::new("Mode Control").size(14.0).strong());
                 ui.add_space(5.0);
                 self.render_controls(ui);
             });
 
-            ui.add_space(10.0);
+            ui.add_space(8.0);
 
-            // History graph
+            // Target temperature
             ui.group(|ui| {
-                ui.label(egui::RichText::new("Temperature History (2 min)").size(12.0).strong());
+                ui.label(egui::RichText::new("Target Temperature").size(14.0).strong());
                 ui.add_space(5.0);
-                self.render_history(ui);
+                self.render_target_temp(ui);
             });
 
-            ui.add_space(5.0);
+            ui.add_space(8.0);
 
-            // Status bar
-            self.render_status(ui);
+            // History graph
+            let target = self.target_temp;
+            ui.group(|ui| {
+                ui.label(egui::RichText::new("Temperature History (2 min)").size(14.0).strong());
+                ui.add_space(5.0);
+                self.render_history(ui, target);
+            });
+
+            // Status bar at bottom
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+                self.render_status(ui);
+            });
         });
     }
 }

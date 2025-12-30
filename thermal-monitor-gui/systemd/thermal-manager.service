@@ -1,0 +1,10 @@
+[Unit]
+Description=Thermal Manager - Automatic CPU thermal management
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/thermal-manager.sh
+
+[Install]
+WantedBy=multi-user.target

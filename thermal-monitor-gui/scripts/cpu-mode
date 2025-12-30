@@ -1,0 +1,164 @@
+#!/bin/bash
+# CPU Mode Manager v2.1 - Multi-distro compatible
+# Supports: Intel pstate, AMD pstate, generic cpufreq
+
+MODE="${1:-status}"
+
+# Detect CPU driver
+detect_driver() {
+    if [ -d /sys/devices/system/cpu/intel_pstate ]; then
+        echo "intel_pstate"
+    elif [ -d /sys/devices/system/cpu/amd_pstate ]; then
+        echo "amd_pstate"
+    else
+        echo "cpufreq"
+    fi
+}
+
+DRIVER=$(detect_driver)
+
+get_cpu_temp() {
+    local max_temp=0
+    for zone in /sys/class/thermal/thermal_zone*/temp; do
+        local ztype=$(cat "$(dirname "$zone")/type" 2>/dev/null)
+        if [[ "$ztype" == *"pkg"* ]] || [[ "$ztype" == "TCPU" ]] || [[ "$ztype" == "k10temp" ]]; then
+            local t=$(cat "$zone" 2>/dev/null)
+            t=$((t / 1000))
+            [ $t -gt $max_temp ] && max_temp=$t
+        fi
+    done
+    [ $max_temp -eq 0 ] && max_temp=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null | awk '{print int($1/1000)}')
+    echo $max_temp
+}
+
+get_current_status() {
+    local TEMP=$(get_cpu_temp)
+    local FREQ=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null | awk '{print int($1/1000)}')
+    local CURRENT_MODE=$(cat /tmp/cpu-mode.current 2>/dev/null || echo "unknown")
+    local KEYBOARD_EST=$((28 + (TEMP - 28) * 45 / 100))
+    local MAX_PERF="N/A"
+
+    if [ "$DRIVER" = "intel_pstate" ]; then
+        MAX_PERF=$(cat /sys/devices/system/cpu/intel_pstate/max_perf_pct 2>/dev/null)
+    elif [ "$DRIVER" = "amd_pstate" ]; then
+        MAX_PERF=$(cat /sys/devices/system/cpu/amd_pstate/max_perf_pct 2>/dev/null || echo "100")
+    fi
+
+    echo "Thermal Monitor - CPU Mode Manager"
+    echo "===================================="
+    echo " Driver:      $DRIVER"
+    echo " Mode:        ${CURRENT_MODE^^}"
+    echo " CPU:         ${TEMP}C"
+    echo " Keyboard:    ~${KEYBOARD_EST}C (estimated)"
+    echo " Frequency:   ${FREQ} MHz"
+    [ "$MAX_PERF" != "N/A" ] && echo " Performance: ${MAX_PERF}%"
+    echo ""
+    echo "Available modes: performance, comfort, balanced, quiet, auto"
+}
+
+set_perf_pct() {
+    local max=$1 min=$2
+    if [ "$DRIVER" = "intel_pstate" ]; then
+        echo $max > /sys/devices/system/cpu/intel_pstate/max_perf_pct 2>/dev/null
+        echo $min > /sys/devices/system/cpu/intel_pstate/min_perf_pct 2>/dev/null
+    elif [ "$DRIVER" = "amd_pstate" ]; then
+        echo $max > /sys/devices/system/cpu/amd_pstate/max_perf_pct 2>/dev/null
+    else
+        local max_freq=$(cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq 2>/dev/null || echo 4400000)
+        local target=$((max_freq * max / 100))
+        for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq; do
+            echo $target > "$cpu" 2>/dev/null
+        done
+    fi
+}
+
+set_epp() {
+    local epp=$1
+    for f in /sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference; do
+        echo "$epp" > "$f" 2>/dev/null
+    done
+}
+
+set_turbo() {
+    local disable=$1
+    if [ "$DRIVER" = "intel_pstate" ]; then
+        echo $disable > /sys/devices/system/cpu/intel_pstate/no_turbo 2>/dev/null
+    elif [ "$DRIVER" = "amd_pstate" ]; then
+        [ $disable -eq 1 ] && echo 0 > /sys/devices/system/cpu/boost 2>/dev/null
+        [ $disable -eq 0 ] && echo 1 > /sys/devices/system/cpu/boost 2>/dev/null
+    fi
+}
+
+set_platform() {
+    echo "$1" > /sys/firmware/acpi/platform_profile 2>/dev/null || true
+}
+
+set_performance() {
+    echo "Setting PERFORMANCE mode..."
+    set_platform "performance"
+    set_perf_pct 100 20
+    set_epp "performance"
+    set_turbo 0
+    echo "performance" > /tmp/cpu-mode.current
+    echo "Done. Max performance enabled."
+}
+
+set_comfort() {
+    echo "Setting COMFORT mode..."
+    set_platform "balanced"
+    set_perf_pct 60 10
+    set_epp "balance_power"
+    set_turbo 1
+    echo "comfort" > /tmp/cpu-mode.current
+    echo "Done. Keyboard will stay cool (~35C)."
+}
+
+set_balanced() {
+    echo "Setting BALANCED mode..."
+    set_platform "balanced"
+    set_perf_pct 75 10
+    set_epp "balance_performance"
+    set_turbo 0
+    echo "balanced" > /tmp/cpu-mode.current
+    echo "Done. Balanced performance."
+}
+
+set_quiet() {
+    echo "Setting QUIET mode..."
+    set_platform "low-power"
+    set_perf_pct 40 10
+    set_epp "power"
+    set_turbo 1
+    echo "quiet" > /tmp/cpu-mode.current
+    echo "Done. Silent operation."
+}
+
+set_auto() {
+    echo "Setting AUTO mode..."
+    set_platform "balanced"
+    if [ -x /usr/local/bin/thermal-manager.sh ]; then
+        systemctl start thermal-manager.timer 2>/dev/null || /usr/local/bin/thermal-manager.sh
+    else
+        set_balanced
+    fi
+    echo "auto" > /tmp/cpu-mode.current
+    echo "Done. Automatic thermal management."
+}
+
+if [[ "$MODE" != "status" ]] && [[ $EUID -ne 0 ]]; then
+    echo "Error: Root required. Use: sudo cpu-mode $MODE"
+    exit 1
+fi
+
+case "$MODE" in
+    performance|perf|p) set_performance ;;
+    comfort|comf|c)     set_comfort ;;
+    balanced|balance|b) set_balanced ;;
+    quiet|silent|q|s)   set_quiet ;;
+    auto|a)             set_auto ;;
+    status|"")          get_current_status ;;
+    *)
+        echo "Unknown mode: $MODE"
+        echo "Valid: performance, comfort, balanced, quiet, auto"
+        exit 1 ;;
+esac
