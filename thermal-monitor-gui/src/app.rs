@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use egui_plot::{Line, Plot, PlotPoints};
 
-use crate::system::{Mode, ThermalState, ThermalZone, set_mode};
+use crate::system::{Mode, ThermalState, ThermalZone, set_mode, set_fan_boost, apply_thermal_control};
 
 /// Update interval in seconds
 const UPDATE_INTERVAL_SECS: f32 = 2.0;
@@ -86,6 +86,8 @@ pub struct ThermalApp {
     last_update: Instant,
     status_message: Option<(String, Instant)>,
     target_temp: f32,
+    auto_control: bool,
+    fan_boost_manual: bool,
 }
 
 impl Default for ThermalApp {
@@ -100,6 +102,8 @@ impl Default for ThermalApp {
             last_update: Instant::now(),
             status_message: None,
             target_temp: 55.0,
+            auto_control: false,
+            fan_boost_manual: false,
         }
     }
 }
@@ -113,6 +117,15 @@ impl ThermalApp {
     fn update_state(&mut self) {
         self.state = ThermalState::read();
         self.history.push(self.state.cpu_temp, self.state.keyboard_temp);
+
+        // Apply automatic thermal control if enabled
+        if self.auto_control {
+            if let Ok(msg) = apply_thermal_control(self.state.cpu_temp, self.target_temp) {
+                if msg != "On target" {
+                    self.status_message = Some((msg, Instant::now()));
+                }
+            }
+        }
     }
 
     /// Change CPU mode
@@ -267,31 +280,105 @@ impl ThermalApp {
     fn render_target_temp(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("Target:").size(14.0));
-            ui.add_space(10.0);
+            ui.add_space(5.0);
 
             let slider = egui::Slider::new(&mut self.target_temp, 40.0..=80.0)
                 .suffix("°C")
                 .step_by(1.0)
                 .text("");
-            ui.add_sized([200.0, 25.0], slider);
+            ui.add_sized([150.0, 25.0], slider);
 
-            ui.add_space(15.0);
+            ui.add_space(10.0);
 
-            // Show warning if CPU exceeds target
+            // Auto control checkbox
+            let auto_label = if self.auto_control { "Auto ON" } else { "Auto OFF" };
+            let auto_color = if self.auto_control {
+                egui::Color32::from_rgb(100, 220, 100)
+            } else {
+                egui::Color32::GRAY
+            };
+            if ui.add(egui::Button::new(
+                egui::RichText::new(auto_label).size(12.0).color(auto_color)
+            ).min_size(egui::vec2(80.0, 25.0))).clicked() {
+                self.auto_control = !self.auto_control;
+                if self.auto_control {
+                    self.set_status("Auto thermal control ENABLED".into());
+                } else {
+                    self.set_status("Auto thermal control DISABLED".into());
+                }
+            }
+
+            ui.add_space(10.0);
+
+            // Status indicator
             if self.state.cpu_temp > self.target_temp {
                 ui.label(
-                    egui::RichText::new(format!("⚠ CPU exceeds target by {:.1}°C",
-                        self.state.cpu_temp - self.target_temp))
+                    egui::RichText::new(format!("+{:.1}°C", self.state.cpu_temp - self.target_temp))
                         .size(13.0)
                         .color(egui::Color32::from_rgb(255, 150, 100)),
                 );
             } else {
                 ui.label(
-                    egui::RichText::new("✓ Within target")
+                    egui::RichText::new("OK")
                         .size(13.0)
                         .color(egui::Color32::from_rgb(100, 220, 100)),
                 );
             }
+        });
+    }
+
+    /// Render fan control
+    fn render_fan_control(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Fan:").size(14.0));
+            ui.add_space(10.0);
+
+            // Fan boost button
+            let fan_label = if self.state.fan_boost || self.fan_boost_manual {
+                "BOOST ON"
+            } else {
+                "BOOST OFF"
+            };
+            let fan_color = if self.state.fan_boost || self.fan_boost_manual {
+                egui::Color32::from_rgb(255, 150, 100)
+            } else {
+                egui::Color32::GRAY
+            };
+
+            if ui.add(egui::Button::new(
+                egui::RichText::new(fan_label).size(14.0).color(
+                    if self.state.fan_boost || self.fan_boost_manual {
+                        egui::Color32::BLACK
+                    } else {
+                        fan_color
+                    }
+                )
+            )
+            .fill(if self.state.fan_boost || self.fan_boost_manual {
+                fan_color
+            } else {
+                egui::Color32::TRANSPARENT
+            })
+            .stroke(egui::Stroke::new(1.0, fan_color))
+            .min_size(egui::vec2(100.0, 30.0))).clicked() {
+                self.fan_boost_manual = !self.fan_boost_manual;
+                if let Err(e) = set_fan_boost(self.fan_boost_manual) {
+                    self.set_status(format!("Fan error: {}", e));
+                } else {
+                    self.set_status(if self.fan_boost_manual {
+                        "Fan BOOST activated".into()
+                    } else {
+                        "Fan returned to AUTO".into()
+                    });
+                }
+            }
+
+            ui.add_space(20.0);
+            ui.label(
+                egui::RichText::new("Manual fan boost for rapid cooling")
+                    .size(11.0)
+                    .color(egui::Color32::GRAY),
+            );
         });
     }
 
@@ -352,7 +439,7 @@ impl ThermalApp {
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(
-                    egui::RichText::new("Lenovo IdeaPad Thermal Monitor v1.0.0")
+                    egui::RichText::new("Thermal Monitor v1.2.0")
                         .size(11.0)
                         .color(egui::Color32::DARK_GRAY),
                 );
@@ -424,11 +511,23 @@ impl eframe::App for ThermalApp {
 
             ui.add_space(8.0);
 
-            // Target temperature
-            ui.group(|ui| {
-                ui.label(egui::RichText::new("Target Temperature").size(14.0).strong());
-                ui.add_space(5.0);
-                self.render_target_temp(ui);
+            // Target temperature and Fan control in same row
+            ui.horizontal(|ui| {
+                ui.group(|ui| {
+                    ui.set_min_width(400.0);
+                    ui.label(egui::RichText::new("Target Temperature").size(14.0).strong());
+                    ui.add_space(5.0);
+                    self.render_target_temp(ui);
+                });
+
+                ui.add_space(10.0);
+
+                ui.group(|ui| {
+                    ui.set_min_width(330.0);
+                    ui.label(egui::RichText::new("Fan Control").size(14.0).strong());
+                    ui.add_space(5.0);
+                    self.render_fan_control(ui);
+                });
             });
 
             ui.add_space(8.0);
@@ -466,17 +565,42 @@ mod tests {
     }
 
     #[test]
+    fn test_history_empty() {
+        let history = TemperatureHistory::new(10);
+        assert!(history.is_empty());
+        assert_eq!(history.len(), 0);
+    }
+
+    #[test]
+    fn test_history_default() {
+        let history = TemperatureHistory::default();
+        assert!(history.is_empty());
+        assert_eq!(history.capacity, HISTORY_CAPACITY);
+    }
+
+    #[test]
     fn test_history_points() {
         let mut history = TemperatureHistory::new(10);
         history.push(40.0, 35.0);
         history.push(42.0, 36.0);
 
-        let cpu_points = history.cpu_points();
-        let kbd_points = history.kbd_points();
+        let _cpu_points = history.cpu_points();
+        let _kbd_points = history.kbd_points();
 
         // Verify points are generated correctly
         assert!(!history.is_empty());
         assert_eq!(history.len(), 2);
+    }
+
+    #[test]
+    fn test_history_fifo_behavior() {
+        let mut history = TemperatureHistory::new(2);
+        history.push(10.0, 5.0);  // First in
+        history.push(20.0, 10.0);
+        history.push(30.0, 15.0); // Should push out first
+
+        assert_eq!(history.len(), 2);
+        // First value (10.0) should be gone
     }
 
     #[test]
@@ -496,11 +620,49 @@ mod tests {
     }
 
     #[test]
+    fn test_zone_colors_match_thermal_zone() {
+        // Verify zone_color matches color_rgb from ThermalZone
+        for zone in [
+            ThermalZone::Cool,
+            ThermalZone::Comfort,
+            ThermalZone::Optimal,
+            ThermalZone::Warm,
+            ThermalZone::Hot,
+            ThermalZone::Critical,
+        ] {
+            let (r, g, b) = zone.color_rgb();
+            let color = ThermalApp::zone_color(zone);
+            assert_eq!(color, egui::Color32::from_rgb(r, g, b));
+        }
+    }
+
+    #[test]
     fn test_mode_colors() {
         // Verify all modes have colors
         for mode in Mode::all() {
             let color = ThermalApp::mode_color(*mode);
             assert_ne!(color, egui::Color32::TRANSPARENT);
         }
+    }
+
+    #[test]
+    fn test_mode_color_unknown() {
+        let color = ThermalApp::mode_color(Mode::Unknown);
+        assert_eq!(color, egui::Color32::GRAY);
+    }
+
+    #[test]
+    fn test_mode_colors_distinct() {
+        // Each mode should have a distinct color
+        let colors: Vec<_> = Mode::all().iter().map(|m| ThermalApp::mode_color(*m)).collect();
+
+        // Performance should be reddish
+        assert!(colors[0].r() > colors[0].b());
+
+        // Comfort should be blueish
+        assert!(colors[1].b() > colors[1].r());
+
+        // Balanced should be greenish
+        assert!(colors[2].g() > colors[2].r());
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "thermal-monitor"
-version = "1.0.0"
+version = "1.2.0"
 edition = "2021"
 authors = ["Andres Garcia"]
 description = "Minimal thermal monitoring GUI for Lenovo IdeaPad"

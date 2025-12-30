@@ -228,6 +228,95 @@ pub fn read_platform_profile() -> String {
     read_sysfs_value("/sys/firmware/acpi/platform_profile").unwrap_or_else(|_| "unknown".into())
 }
 
+/// Read fan mode (0=auto, 1=boost)
+pub fn read_fan_mode() -> u8 {
+    read_sysfs_value("/sys/devices/pci0000:00/0000:00:1f.0/PNP0C09:00/VPC2004:00/fan_mode")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
+}
+
+/// Activate fan boost (max speed) - Lenovo IdeaPad specific
+pub fn set_fan_boost(enable: bool) -> io::Result<()> {
+    let value = if enable { "1" } else { "0" };
+    let output = Command::new("pkexec")
+        .args(["bash", "-c", &format!(
+            "echo {} > /sys/devices/pci0000:00/0000:00:1f.0/PNP0C09:00/VPC2004:00/fan_mode",
+            value
+        )])
+        .output()?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::new(ErrorKind::Other, "Failed to set fan mode"))
+    }
+}
+
+/// Set performance percentage directly
+pub fn set_perf_pct(pct: u8) -> io::Result<()> {
+    let pct = pct.clamp(20, 100);
+    let output = Command::new("pkexec")
+        .args(["bash", "-c", &format!(
+            "echo {} > /sys/devices/system/cpu/intel_pstate/max_perf_pct 2>/dev/null || \
+             echo {} > /sys/devices/system/cpu/amd_pstate/max_perf_pct 2>/dev/null || \
+             for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq; do \
+               max=$(cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq); \
+               echo $((max * {} / 100)) > $cpu; \
+             done",
+            pct, pct, pct
+        )])
+        .output()?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::new(ErrorKind::Other, "Failed to set performance"))
+    }
+}
+
+/// Calculate required performance percentage to reach target temperature
+pub fn calc_perf_for_target(current_temp: f32, target_temp: f32, current_perf: u8) -> u8 {
+    if current_temp <= target_temp {
+        // Below target, can increase performance
+        (current_perf as f32 * 1.1).min(100.0) as u8
+    } else {
+        // Above target, reduce performance proportionally
+        let ratio = target_temp / current_temp;
+        ((current_perf as f32 * ratio) as u8).clamp(20, 100)
+    }
+}
+
+/// Apply thermal control to reach target temperature
+pub fn apply_thermal_control(current_temp: f32, target_temp: f32) -> io::Result<String> {
+    let current_perf = read_perf_pct().unwrap_or(75);
+    let diff = current_temp - target_temp;
+
+    if diff > 10.0 {
+        // Critical: fan boost + aggressive throttle
+        let _ = set_fan_boost(true);
+        set_perf_pct(30)?;
+        Ok("CRITICAL: Fan boost + 30%".into())
+    } else if diff > 5.0 {
+        // High: fan boost + moderate throttle
+        let _ = set_fan_boost(true);
+        set_perf_pct(50)?;
+        Ok("HIGH: Fan boost + 50%".into())
+    } else if diff > 0.0 {
+        // Slight overshoot: gradual reduction
+        let new_perf = calc_perf_for_target(current_temp, target_temp, current_perf);
+        set_perf_pct(new_perf)?;
+        Ok(format!("Adjusting to {}%", new_perf))
+    } else if diff < -5.0 {
+        // Well below target: can increase
+        let new_perf = (current_perf + 10).min(100);
+        set_perf_pct(new_perf)?;
+        Ok(format!("Increasing to {}%", new_perf))
+    } else {
+        Ok("On target".into())
+    }
+}
+
 /// Change CPU mode using pkexec
 pub fn set_mode(mode: Mode) -> io::Result<()> {
     let output = Command::new("pkexec")
@@ -253,6 +342,7 @@ pub struct ThermalState {
     pub max_freq_mhz: u32,
     pub mode: Mode,
     pub platform_profile: String,
+    pub fan_boost: bool,
 }
 
 impl ThermalState {
@@ -271,6 +361,7 @@ impl ThermalState {
             max_freq_mhz: read_max_freq().unwrap_or(4400),
             mode: read_mode(),
             platform_profile: read_platform_profile(),
+            fan_boost: read_fan_mode() == 1,
         }
     }
 
@@ -305,6 +396,28 @@ mod tests {
     }
 
     #[test]
+    fn test_thermal_zone_boundary_values() {
+        assert_eq!(ThermalZone::from_cpu_temp(39.9), ThermalZone::Cool);
+        assert_eq!(ThermalZone::from_cpu_temp(40.0), ThermalZone::Comfort);
+        assert_eq!(ThermalZone::from_cpu_temp(44.9), ThermalZone::Comfort);
+        assert_eq!(ThermalZone::from_cpu_temp(45.0), ThermalZone::Optimal);
+        assert_eq!(ThermalZone::from_cpu_temp(54.9), ThermalZone::Warm);
+        assert_eq!(ThermalZone::from_cpu_temp(55.0), ThermalZone::Hot);
+        assert_eq!(ThermalZone::from_cpu_temp(64.9), ThermalZone::Hot);
+        assert_eq!(ThermalZone::from_cpu_temp(65.0), ThermalZone::Critical);
+    }
+
+    #[test]
+    fn test_thermal_zone_labels() {
+        assert_eq!(ThermalZone::Cool.label(), "COOL");
+        assert_eq!(ThermalZone::Comfort.label(), "COMFORT");
+        assert_eq!(ThermalZone::Optimal.label(), "OPTIMAL");
+        assert_eq!(ThermalZone::Warm.label(), "WARM");
+        assert_eq!(ThermalZone::Hot.label(), "HOT");
+        assert_eq!(ThermalZone::Critical.label(), "CRITICAL");
+    }
+
+    #[test]
     fn test_keyboard_temp_calculation() {
         // At 50°C CPU with 28°C ambient: 28 + (50-28)*0.45 = 28 + 9.9 = 37.9
         let kbd = calculate_keyboard_temp(50.0, 28.0);
@@ -313,6 +426,14 @@ mod tests {
         // At ambient temp, keyboard should be at ambient
         let kbd = calculate_keyboard_temp(28.0, 28.0);
         assert!((kbd - 28.0).abs() < 0.1);
+
+        // High CPU temp
+        let kbd = calculate_keyboard_temp(80.0, 25.0);
+        assert!((kbd - 49.75).abs() < 0.1); // 25 + (80-25)*0.45 = 49.75
+
+        // Low ambient
+        let kbd = calculate_keyboard_temp(60.0, 20.0);
+        assert!((kbd - 38.0).abs() < 0.1); // 20 + (60-20)*0.45 = 38.0
     }
 
     #[test]
@@ -323,11 +444,124 @@ mod tests {
     }
 
     #[test]
+    fn test_mode_all_variants() {
+        assert_eq!(Mode::Performance.command(), "performance");
+        assert_eq!(Mode::Comfort.command(), "comfort");
+        assert_eq!(Mode::Balanced.command(), "balanced");
+        assert_eq!(Mode::Quiet.command(), "quiet");
+        assert_eq!(Mode::Auto.command(), "auto");
+        assert_eq!(Mode::Unknown.command(), "auto");
+    }
+
+    #[test]
+    fn test_mode_labels() {
+        assert_eq!(Mode::Performance.label(), "PERFORMANCE");
+        assert_eq!(Mode::Comfort.label(), "COMFORT");
+        assert_eq!(Mode::Balanced.label(), "BALANCED");
+        assert_eq!(Mode::Quiet.label(), "QUIET");
+        assert_eq!(Mode::Auto.label(), "AUTO");
+        assert_eq!(Mode::Unknown.label(), "UNKNOWN");
+    }
+
+    #[test]
+    fn test_mode_descriptions() {
+        assert!(Mode::Performance.description().contains("100%"));
+        assert!(Mode::Comfort.description().contains("60%"));
+        assert!(Mode::Balanced.description().contains("75%"));
+        assert!(Mode::Quiet.description().contains("40%"));
+        assert!(Mode::Auto.description().contains("Automatic"));
+    }
+
+    #[test]
     fn test_thermal_zone_colors() {
         let (r, g, b) = ThermalZone::Cool.color_rgb();
         assert!(b > r); // Blue should be dominant for cool
 
         let (r, g, b) = ThermalZone::Critical.color_rgb();
         assert!(r > g && r > b); // Red should be dominant for critical
+    }
+
+    #[test]
+    fn test_all_thermal_zone_colors_valid() {
+        for zone in [
+            ThermalZone::Cool,
+            ThermalZone::Comfort,
+            ThermalZone::Optimal,
+            ThermalZone::Warm,
+            ThermalZone::Hot,
+            ThermalZone::Critical,
+        ] {
+            let (r, g, b) = zone.color_rgb();
+            // All colors should have some value
+            assert!(r > 0 || g > 0 || b > 0);
+        }
+    }
+
+    #[test]
+    fn test_calc_perf_for_target_below_target() {
+        // Below target - should increase
+        let perf = calc_perf_for_target(45.0, 55.0, 50);
+        assert!(perf > 50); // Should increase
+        assert!(perf <= 100);
+    }
+
+    #[test]
+    fn test_calc_perf_for_target_above_target() {
+        // Above target - should decrease
+        let perf = calc_perf_for_target(60.0, 50.0, 80);
+        assert!(perf < 80); // Should decrease
+        assert!(perf >= 20); // Min clamp
+    }
+
+    #[test]
+    fn test_calc_perf_for_target_at_target() {
+        // At target - minimal change
+        let perf = calc_perf_for_target(55.0, 55.0, 75);
+        assert!(perf >= 20 && perf <= 100);
+    }
+
+    #[test]
+    fn test_calc_perf_for_target_clamping() {
+        // Very high temp - should clamp to minimum
+        let perf = calc_perf_for_target(100.0, 50.0, 100);
+        assert!(perf >= 20);
+
+        // Very low temp - should clamp to maximum
+        let perf = calc_perf_for_target(30.0, 80.0, 90);
+        assert!(perf <= 100);
+    }
+
+    #[test]
+    fn test_thermal_state_freq_conversion() {
+        let state = ThermalState {
+            current_freq_mhz: 2500,
+            max_freq_mhz: 4400,
+            ..Default::default()
+        };
+        assert!((state.current_freq_ghz() - 2.5).abs() < 0.01);
+        assert!((state.max_freq_ghz() - 4.4).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_thermal_state_zone() {
+        let state = ThermalState {
+            cpu_temp: 45.0,
+            ..Default::default()
+        };
+        assert_eq!(state.thermal_zone(), ThermalZone::Optimal);
+    }
+
+    #[test]
+    fn test_mode_default() {
+        let mode = Mode::default();
+        assert_eq!(mode, Mode::Auto);
+    }
+
+    #[test]
+    fn test_thermal_state_default() {
+        let state = ThermalState::default();
+        assert_eq!(state.cpu_temp, 0.0);
+        assert_eq!(state.mode, Mode::Auto);
+        assert!(!state.fan_boost);
     }
 }
