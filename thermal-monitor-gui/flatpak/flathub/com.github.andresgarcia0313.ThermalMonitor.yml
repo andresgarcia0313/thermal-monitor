@@ -37,7 +37,7 @@ modules:
       - install -Dm644 thermal-monitor-gui/flatpak/com.github.andresgarcia0313.ThermalMonitor.svg /app/share/icons/hicolor/scalable/apps/com.github.andresgarcia0313.ThermalMonitor.svg
     sources:
       - type: git
-        url: https://github.com/andresgarcia0313/lenovo-ideapad.git
+        url: https://github.com/andresgarcia0313/thermal-monitor.git
         tag: v1.3.1
         commit: 98c2b6fe34b3bd4060beb6eb85f2e84b7be05837
       - type: file

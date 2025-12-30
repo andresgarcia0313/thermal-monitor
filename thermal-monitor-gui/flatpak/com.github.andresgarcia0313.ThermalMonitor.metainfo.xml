@@ -33,13 +33,13 @@
   <screenshots>
     <screenshot type="default">
       <caption>Main window showing temperatures and controls</caption>
-      <image>https://raw.githubusercontent.com/andresgarcia0313/lenovo-ideapad/main/thermal-monitor-gui/screenshots/main.png</image>
+      <image>https://raw.githubusercontent.com/andresgarcia0313/thermal-monitor/main/thermal-monitor-gui/screenshots/main.png</image>
     </screenshot>
   </screenshots>
 
-  <url type="homepage">https://github.com/andresgarcia0313/lenovo-ideapad</url>
-  <url type="bugtracker">https://github.com/andresgarcia0313/lenovo-ideapad/issues</url>
-  <url type="vcs-browser">https://github.com/andresgarcia0313/lenovo-ideapad</url>
+  <url type="homepage">https://github.com/andresgarcia0313/thermal-monitor</url>
+  <url type="bugtracker">https://github.com/andresgarcia0313/thermal-monitor/issues</url>
+  <url type="vcs-browser">https://github.com/andresgarcia0313/thermal-monitor</url>
 
   <developer_name>Andres Garcia</developer_name>
 
